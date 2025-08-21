@@ -1,0 +1,8 @@
+Delete these files/folders for a clean project:
+- templates/static/app.py
+- templates/static/requirements.txt
+- templates/static/.env
+- templates/static/style.css
+- templates/static/
+
+After deleting, your project will be clean and ready for presentation!
