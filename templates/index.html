@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Data Redundancy Removal System</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h1>Data Redundancy Removal System</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="messages">
+        {% for cat, msg in messages %}
+          <div class="alert {{ cat }}">{{ msg }}</div>
+        {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <form action="{{ url_for('ingest') }}" method="post" class="ingest-form">
+      <label>Name <span class="req">*</span></label>
+      <input type="text" name="name" placeholder="Full name" required />
+
+      <label>Email</label>
+      <input type="email" name="email" placeholder="email@example.com" />
+
+      <label>Phone</label>
+      <input type="text" name="phone" placeholder="+91 98765 43210" />
+
+      <label>Address</label>
+      <input type="text" name="address" placeholder="Address" />
+
+      <button type="submit">Submit</button>
+    </form>
+
+    <hr/>
+
+    <h2>Recent records</h2>
+    <table class="records">
+      <thead>
+        <tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Status</th><th>Similarity</th><th>Created</th></tr>
+      </thead>
+      <tbody>
+        {% if records %}
+          {% for r in records %}
+            <tr>
+              <td><a href="{{ url_for('view_record', record_id=r.id) }}">{{ r.id[:8] }}</a></td>
+              <td>{{ r.name or '-' }}</td>
+              <td>{{ r.email or '-' }}</td>
+              <td>{{ r.phone or '-' }}</td>
+              <td>{{ r.status }}</td>
+              <td>{{ (r.similarity_score | default('-')) }}</td>
+              <td>{{ r.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="7">No records yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    {% if single %}
+      <hr/>
+      <h2>Record detail</h2>
+      <pre>{{ single.raw_payload }}</pre>
+    {% endif %}
+  </div>
+</body>
+</html>

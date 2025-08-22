@@ -1,0 +1,17 @@
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background:#f6f8fa; color:#222; padding:20px; }
+.container { max-width:900px; margin:0 auto; background:white; padding:20px; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.06); }
+h1 { margin-top:0; }
+.ingest-form { display:grid; gap:8px; grid-template-columns: 1fr 1fr; }
+.ingest-form label { grid-column: span 2; font-weight:600; }
+.ingest-form input { padding:8px 10px; border:1px solid #dcdfe6; border-radius:6px; }
+.ingest-form button { grid-column: span 2; padding:10px; border:none; background:#154fcb; color:white; border-radius:6px; cursor:pointer; font-weight:600; }
+.req { color:#d00; }
+hr { margin:18px 0; border:none; border-top:1px solid #eee; }
+.records { width:100%; border-collapse:collapse; margin-top:10px; }
+.records th, .records td { text-align:left; padding:8px; border-bottom:1px solid #f0f0f0; font-size:13px; }
+.alert { padding:8px 10px; border-radius:6px; margin:6px 0; }
+.alert.info { background:#e6f0ff; color:#0f172a; }
+.alert.success { background:#ecfdf5; color:#065f46; }
+.alert.warning { background:#fffbeb; color:#92400e; }
+.alert.danger { background:#ffecee; color:#7b1e1e; }
+.messages { margin-bottom:10px; }

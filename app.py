@@ -1,0 +1,272 @@
+import os
+import re
+import hashlib
+import json
+import uuid
+from datetime import datetime
+
+from flask import Flask, render_template, request, redirect, url_for, flash, g
+from sqlalchemy import (create_engine, MetaData, Table, Column, String, Text,
+                        DateTime, ForeignKey, Float, select, insert, exc, UniqueConstraint)
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql import and_
+from rapidfuzz import fuzz
+from email_validator import validate_email, EmailNotValidError
+
+# Configuration
+DB_PATH = os.getenv("DB_PATH", "sqlite:///database.db")
+DUPLICATE_THRESHOLD = int(os.getenv("DUPLICATE_THRESHOLD", "90"))
+POSSIBLE_DUP_THRESHOLD = int(os.getenv("POSSIBLE_DUP_THRESHOLD", "80"))
+
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")  # change in production
+
+# SQLAlchemy engine + metadata
+engine = create_engine(DB_PATH, echo=False, future=True)
+metadata = MetaData()
+
+# Table definition
+records = Table(
+    "records",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("raw_payload", Text, nullable=False),
+    Column("name", Text),
+    Column("email", Text),
+    Column("phone", Text),
+    Column("address", Text),
+    Column("canonical_text", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("duplicate_of", String(36), ForeignKey("records.id"), nullable=True),
+    Column("similarity_score", Float, nullable=True),
+    Column("status", Text, nullable=False, default="unique"),  # unique|duplicate|possible_duplicate|invalid
+    Column("created_at", DateTime, default=datetime.utcnow),
+    Column("updated_at", DateTime, default=datetime.utcnow),
+    UniqueConstraint("content_hash", name="ux_content_hash"),
+)
+
+def init_db():
+    metadata.create_all(engine)
+
+# Normalization helpers
+SPACE_RE = re.compile(r"\s+")
+NON_DIGIT = re.compile(r"\D+")
+
+def normalize_phone(phone: str | None) -> str | None:
+    if not phone:
+        return None
+    digits = NON_DIGIT.sub("", phone)
+    return digits or None
+
+def cs(x: str) -> str:
+    return SPACE_RE.sub(" ", (x or "").strip().lower())
+
+def canonicalize(payload: dict) -> tuple[str, dict]:
+    name = cs(payload.get("name", ""))
+    email = (payload.get("email") or "").strip().lower()
+    # validate email minimal: we'll use email-validator later
+    phone = normalize_phone(payload.get("phone"))
+    address = cs(payload.get("address", ""))
+    canonical_map = {
+        "name": name,
+        "email": email,
+        "phone": phone or "",
+        "address": address,
+    }
+    # Deterministic canonical string
+    canonical_text = "|".join(f"{k}:{canonical_map[k]}" for k in sorted(canonical_map.keys()))
+    return canonical_text, canonical_map
+
+def sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def validate_input(payload: dict) -> tuple[bool, str]:
+    name = payload.get("name")
+    if not name or not name.strip():
+        return False, "Name is required."
+    email = payload.get("email")
+    if email:
+        try:
+            validate_email(email)
+        except EmailNotValidError as e:
+            return False, f"Invalid email: {str(e)}"
+    phone = payload.get("phone")
+    if phone:
+        digits = normalize_phone(phone)
+        if not digits or len(digits) < 7:
+            return False, "Phone number seems invalid (need at least 7 digits)."
+    return True, ""
+
+def find_best_fuzzy(db_conn, canon_map: dict):
+    # Quick candidate selection: same email domain or same phone prefix
+    domain = (canon_map.get("email") or "").split("@")[-1] if canon_map.get("email") else ""
+    phone3 = (canon_map.get("phone") or "")[:3]
+
+    stmt = select(records).limit(200)  # keep safe limit
+    # We'll fetch and then filter heuristically to keep code simple (SQLite lacks advanced queries)
+    res = db_conn.execute(stmt).fetchall()
+    best = None
+    best_score = None
+    for row in res:
+        cand = {
+            "name": row["name"] or "",
+            "email": row["email"] or "",
+            "phone": row["phone"] or "",
+            "address": row["address"] or "",
+        }
+        # quick heuristic skip: if domain and domain not in candidate email, maybe low priority
+        if domain and domain not in cand["email"]:
+            # continue but still consider (we don't want false negatives); lower weight
+            pass
+        if phone3 and (not cand["phone"].startswith(phone3)):
+            pass
+        # compute score
+        scores = []
+        if canon_map.get("email") and cand.get("email"):
+            scores.append(fuzz.token_sort_ratio(canon_map["email"], cand["email"]))
+        if canon_map.get("phone") and cand.get("phone"):
+            scores.append(fuzz.partial_ratio(canon_map["phone"], cand["phone"]))
+        scores.append(fuzz.token_sort_ratio(canon_map.get("name",""), cand.get("name","")))
+        scores.append(fuzz.token_sort_ratio(canon_map.get("address",""), cand.get("address","")))
+        score = sum(scores) / max(len(scores), 1)
+        if best_score is None or score > best_score:
+            best_score = score
+            best = row
+    return best, float(best_score) if best_score is not None else None
+
+@app.before_request
+def setup():
+    init_db()
+
+@app.route("/", methods=["GET"])
+def index():
+    # show last 20 records
+    with engine.connect() as conn:
+        rows = conn.execute(select(records).order_by(records.c.created_at.desc()).limit(20)).fetchall()
+    return render_template("index.html", records=rows)
+
+@app.route("/ingest", methods=["POST"])
+def ingest():
+    payload = {
+        "name": request.form.get("name", ""),
+        "email": request.form.get("email", "") or None,
+        "phone": request.form.get("phone", "") or None,
+        "address": request.form.get("address", "") or None,
+    }
+
+    ok, msg = validate_input(payload)
+    if not ok:
+        flash(msg, "danger")
+        return redirect(url_for("index"))
+
+    canonical_text, canon_map = canonicalize(payload)
+    content_hash = sha256_hex(canonical_text)
+
+    with engine.connect() as conn:
+        # 1) Exact check in DB (fast)
+        existing = conn.execute(select(records).where(records.c.content_hash == content_hash)).fetchone()
+        if existing:
+            flash("Exact duplicate found (hash match). Linked to existing record.", "warning")
+            return redirect(url_for("index"))
+
+        # 2) Fuzzy search for likely duplicates
+        best, best_score = find_best_fuzzy(conn, canon_map)
+
+        if best is not None and best_score is not None:
+            if best_score >= DUPLICATE_THRESHOLD:
+                # Treat as duplicate: don't insert new source; instead create a duplicate record entry that points to original
+                rec_id = str(uuid.uuid4())
+                rec = {
+                    "id": rec_id,
+                    "raw_payload": json.dumps(payload),
+                    "name": canon_map.get("name"),
+                    "email": canon_map.get("email") or None,
+                    "phone": canon_map.get("phone") or None,
+                    "address": canon_map.get("address") or None,
+                    "canonical_text": canonical_text,
+                    "content_hash": content_hash,
+                    "duplicate_of": best["id"],
+                    "similarity_score": best_score,
+                    "status": "duplicate",
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                }
+                # Try insert; if unique constraint fails, it's because someone inserted concurrently
+                try:
+                    conn.execute(insert(records).values(**rec))
+                    conn.commit()
+                    flash(f"Duplicate detected (score {best_score:.1f}). Linked to record {best['id']}.", "warning")
+                except IntegrityError:
+                    conn.rollback()
+                    flash("Duplicate detected and existing record already present.", "warning")
+                return redirect(url_for("index"))
+            elif best_score >= POSSIBLE_DUP_THRESHOLD:
+                # Insert but flagged as possible duplicate
+                rec_id = str(uuid.uuid4())
+                rec = {
+                    "id": rec_id,
+                    "raw_payload": json.dumps(payload),
+                    "name": canon_map.get("name"),
+                    "email": canon_map.get("email") or None,
+                    "phone": canon_map.get("phone") or None,
+                    "address": canon_map.get("address") or None,
+                    "canonical_text": canonical_text,
+                    "content_hash": content_hash,
+                    "duplicate_of": best["id"],
+                    "similarity_score": best_score,
+                    "status": "possible_duplicate",
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                }
+                try:
+                    conn.execute(insert(records).values(**rec))
+                    conn.commit()
+                    flash(f"Inserted but flagged as POSSIBLE DUPLICATE (score {best_score:.1f}) against {best['id']}.", "info")
+                except IntegrityError:
+                    conn.rollback()
+                    flash("Insert failed due to concurrent duplicate insertion.", "danger")
+                return redirect(url_for("index"))
+
+        # 3) No fuzzy duplicate found (or below thresholds) -> insert as unique
+        rec_id = str(uuid.uuid4())
+        rec = {
+            "id": rec_id,
+            "raw_payload": json.dumps(payload),
+            "name": canon_map.get("name"),
+            "email": canon_map.get("email") or None,
+            "phone": canon_map.get("phone") or None,
+            "address": canon_map.get("address") or None,
+            "canonical_text": canonical_text,
+            "content_hash": content_hash,
+            "duplicate_of": None,
+            "similarity_score": None,
+            "status": "unique",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        try:
+            conn.execute(insert(records).values(**rec))
+            conn.commit()
+            flash("Inserted as UNIQUE record.", "success")
+        except IntegrityError:
+            conn.rollback()
+            # race condition: someone else inserted same hash concurrently -> treat as duplicate
+            existing = conn.execute(select(records).where(records.c.content_hash == content_hash)).fetchone()
+            if existing:
+                flash("Exact duplicate (concurrent insert). Linked to existing record.", "warning")
+            else:
+                flash("Insert error (unknown integrity error).", "danger")
+
+    return redirect(url_for("index"))
+
+@app.route("/record/<record_id>")
+def view_record(record_id):
+    with engine.connect() as conn:
+        row = conn.execute(select(records).where(records.c.id == record_id)).fetchone()
+    if not row:
+        flash("Record not found.", "danger")
+        return redirect(url_for("index"))
+    return render_template("index.html", single=row, records=[])
+
+if __name__ == "__main__":
+    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
