@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Chatbot</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <div class="sidebar">
+  <h3>🕒 Chat History</h3>
+  {% for chat in history %}
+    <div class="chat-item">
+      <a href="/chat/{{ chat.session_id }}" style="text-decoration: none; color: inherit;">
+        <p><strong>Session:</strong> {{ chat.session_id[:8] }}...</p>
+        <small>{{ chat.timestamp.strftime('%Y-%m-%d %H:%M') }}</small>
+      </a>
+      <hr>
+    </div>
+  {% endfor %}
+</div>
+
+
+  <!-- Chat Area -->
+  <div class="container">
+    <div class="top-bar">
+      <h1>🤖 AI Chatbot</h1>
+      <button onclick="resetChat()">🔄 Reset Chat</button>
+    </div>
+
+    <div id="chat-box" class="chat-box">{{ conversation.replace('\n', '<br>')|safe }}</div>
+
+    <div class="input-area">
+      <input type="text" id="user-input" placeholder="Type your message..." />
+      <button onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  async function sendMessage() {
+    const input = document.getElementById("user-input");
+    const message = input.value.trim();
+    if (!message) return;
+
+    const chatBox = document.getElementById("chat-box");
+    chatBox.innerHTML += `<p><strong>👩 You:</strong> ${message}</p>`;
+
+    const response = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message })
+    });
+
+    const data = await response.json();
+    chatBox.innerHTML += `<p><strong>🤖 Bot:</strong> ${data.response}</p>`;
+    input.value = "";
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  async function resetChat() {
+    await fetch("/reset", { method: "POST" });
+    document.getElementById("chat-box").innerHTML = "";
+  }
+</script>
+
+</body>
+</html>
+
